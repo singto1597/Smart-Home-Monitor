@@ -1,0 +1,16 @@
+{
+	"folders": [
+		{
+			"path": "../.."
+		},
+		{
+			"name": "Home_assistant_ESP32",
+			"path": "../../Home_assistant_ESP32"
+		},
+		{
+			"name": "Home_assistant_ESP_Cam",
+			"path": ".."
+		}
+	],
+	"settings": {}
+}
