@@ -5,18 +5,16 @@
 #include "esp_camera.h"
 #include "SD_MMC.h"
 
+#define RX_PIN 3 
+#define TX_PIN 1 
 
-// กำหนดขา Serial2 ของ ESP32-CAM
-#define RX_PIN 3   // U0R (GPIO3) ใช้อ่านจาก TX ของ ESP32
-#define TX_PIN 1   // U0T (GPIO1) ใช้ส่งกลับไปหา ESP32 (ถ้าต้องการตอบ)
-
-String botToken = "7290873016:AAHMe_2TrILCar166zWO9s4jJsuo9JZ8tzg";
+String botToken = "8216612749:AAE_0eLRSXB5_kN-YEXyfhh2lmXBIkBTg74";
 String chatID = "7969041356";
 
 const char* ssid = "กระจายบุญ";
 const char* password = "25222524";
 
-const char * photoPrefix = "/photo_";
+const char * photoPrefix = "/project_mr.Pitak/photo_";
 int photoNumber = 0;
 
 #define PWDN_GPIO_NUM     32
@@ -36,9 +34,16 @@ int photoNumber = 0;
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
+void checkWifi();
+void connectWiFi();
+void takePhoto();
+String sendPhotoToTelegram(String token, String chat_id);
+void savePhotoToSD(camera_fb_t * fb);
+
+
 void setup() {
-  Serial.begin(115200);         // Debug Monitor
-  Serial2.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN); // Serial2 สำหรับรับจาก ESP32
+  Serial.begin(115200);
+  Serial2.begin(9600, SERIAL_8N1, RX_PIN, TX_PIN);
   Serial.println("ESP32-CAM ready to receive commands...");
   connectWiFi();
 
@@ -79,7 +84,6 @@ void setup() {
   pinMode(14, INPUT_PULLUP);
   #endif
 
-  // camera init
   esp_err_t err = esp_camera_init( & config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
@@ -87,13 +91,12 @@ void setup() {
   }
 
   sensor_t * s = esp_camera_sensor_get();
-  // initial sensors are flipped vertically and colors are a bit saturated
   if (s -> id.PID == OV3660_PID) {
-    s -> set_vflip(s, 1); // flip it back
-    s -> set_brightness(s, 1); // up the brightness just a bit
-    s -> set_saturation(s, -2); // lower the saturation
+    s -> set_vflip(s, 1);
+    s -> set_brightness(s, 1);
+    s -> set_saturation(s, -2);
   }
-  // drop down frame size for higher initial frame rate
+
   s -> set_framesize(s, FRAMESIZE_QVGA);
 
   #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
@@ -117,24 +120,23 @@ void setup() {
 
 void loop() {
   if (Serial2.available()) {
-    String command = Serial2.readStringUntil('\n');  // อ่านทีละบรรทัด
-    command.trim(); // ตัดช่องว่าง/เว้นบรรทัดออก
+    String command = Serial2.readStringUntil('\n');
+    command.trim();
 
     if (command.length() > 0) {
       Serial.print("Received command: ");
       Serial.println(command);
 
-      // ตัวอย่าง: ตรวจสอบคำสั่ง
       if (command == "TAKE_PHOTO") {
-        Serial.println("📷 Received request: TAKE_PHOTO");
+        Serial.println("Received request: TAKE_PHOTO");
         takePhoto();
       } 
       else if (command == "TAKE_PHOTO_AND_SEND") {
-        Serial.println("📷 Received request: TAKE_PHOTO_AND_SEND");
+        Serial.println("Received request: TAKE_PHOTO_AND_SEND");
         sendPhotoToTelegram(botToken, chatID);
       }
       else {
-        Serial.println("❓ Unknown command");
+        Serial.println("Unknown command");
       }
     }
   }
@@ -195,7 +197,7 @@ String sendPhotoToTelegram(String token, String chat_id) {
   }
 
   WiFiClientSecure client;
-  client.setInsecure(); // ข้ามการตรวจสอบใบรับรอง SSL
+  client.setInsecure();
 
   if (!client.connect(myDomain, 443)) {
     Serial.println("Connection to Telegram failed");
@@ -203,7 +205,6 @@ String sendPhotoToTelegram(String token, String chat_id) {
     return "Connection failed";
   }
 
-  // สร้าง header + tail
   String boundary = "ESP32CAM";
   String head = "--" + boundary + "\r\n"
                 "Content-Disposition: form-data; name=\"chat_id\"\r\n\r\n" +
@@ -222,7 +223,7 @@ String sendPhotoToTelegram(String token, String chat_id) {
   client.println();
   client.print(head);
 
-  // ส่งภาพทีละ chunk
+
   uint8_t *fbBuf = fb->buf;
   size_t fbLen = fb->len;
   for (size_t n = 0; n < fbLen; n += 1024) {
@@ -235,9 +236,9 @@ String sendPhotoToTelegram(String token, String chat_id) {
 
   savePhotoToSD(fb); 
 
-  esp_camera_fb_return(fb); // คืน buffer
+  esp_camera_fb_return(fb);
 
-  // อ่าน response แบบง่าย ๆ
+
   String response = "";
   while (client.connected()) {
     if (client.available()) {

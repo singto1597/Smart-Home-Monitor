@@ -4,12 +4,14 @@
 #include <DHT.h>
 #include <LiquidCrystal_I2C.h>
 #include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include <UrlEncode.h>
 
 #define IN_SWITCH_PIN 12
 #define OUT_SWITCH_PIN 13
 
 #define GAS_SENSOR_PIN 34
-#define PIR_SENSOR_PIN 35
+#define PIR_SENSOR_PIN 14
 
 #define RED_LED_PIN 4
 #define YELLOW_LED_PIN 2
@@ -23,14 +25,21 @@
 
 #define ADC_RESOLUTION 4095
 
-String botToken = "7290873016:AAHMe_2TrILCar166zWO9s4jJsuo9JZ8tzg";
+String botToken = "8216612749:AAE_0eLRSXB5_kN-YEXyfhh2lmXBIkBTg74";
 String chatID = "7969041356";
 
-const char* googleScriptURL = "https://script.google.com/macros/s/AKfycbxJml6kIWjmjraKd3SkN68tFN-4r4lITzbSk5Nua2th0zKBcdPc3aa3GVl73-hY0klf/exec";
+const char* googleScriptURL = "https://script.google.com/macros/s/AKfycbzb6h6ei0SyeSQP1Sag8hLeZc_iStKUBuwNqvCAc-dPuyUUveXW3So-PdeZQO5apO4h/exec";
 
 DHT dht(DHT22_PIN, DHT22);
 
-liquidCrystal_I2C lcd(0x27, 16, 2);
+LiquidCrystal_I2C lcd(0x27, 16, 2);
+
+void connectWiFi();
+void checkWifi();
+void sendMessage(String message);
+void sendDataToGoogleSheets();
+void checkTelegramMessages();
+
 
 const char* ssid = "กระจายบุญ";
 const char* password = "25222524";
@@ -45,18 +54,28 @@ bool nightMode = false;
 float temperature = 0.0;
 float humidity = 0.0;
 
+unsigned long lastTriggerTime = 0;
+unsigned long cooldown = 10000;
+
+unsigned long previousMillis = 0;
+const unsigned long interval = 60000; 
+
+unsigned long lastBotTime = 0;
+const unsigned long botInterval = 10000;
+long lastUpdateId = 0;
+
 void setup() {
+  Serial.begin(9600);
   Serial2.begin(9600);
   Serial2.setPins(RX_PIN, TX_PIN);
   delay(1000);
 
   dht.begin();
 
-  lcd.begin();
+  lcd.init();
   lcd.backlight();
   lcd.setCursor(0, 0);
   lcd.print("Home Assistant");
-
 
   pinMode(IN_SWITCH_PIN, INPUT);
   pinMode(OUT_SWITCH_PIN, INPUT);
@@ -68,20 +87,25 @@ void setup() {
   pinMode(GREEN_LED_PIN, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
 
-  // Connect to WiFi
   connectWiFi();
+  sendMessage("Smart Home Monitor is Ready");
+  lcd.clear();
+  lcd.setCursor(0, 0);
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
   if (digitalRead(IN_SWITCH_PIN) == HIGH) {
     numberOfPeople++;
+    tone(BUZZER_PIN, 1000);
+    delay(200);
   }
   if (digitalRead(OUT_SWITCH_PIN) == HIGH) {
     numberOfPeople--;
     if (numberOfPeople < 0) {
       numberOfPeople = 0;
     }
+    tone(BUZZER_PIN, 800);
+    delay(200);
   }
 
   if (numberOfPeople == 0) {
@@ -96,48 +120,77 @@ void loop() {
   humidity = dht.readHumidity();
 
   if (pirState) {
-    if (nightMode || SurveillanceMode) {
-      digitalWrite(RED_LED_PIN, HIGH);
-      digitalWrite(GREEN_LED_PIN, LOW);
+    unsigned long now = millis();
+    if (now - lastTriggerTime > cooldown) {
+      lastTriggerTime = now;
+      
+      if (nightMode || SurveillanceMode) {
+        digitalWrite(RED_LED_PIN, HIGH);
+        digitalWrite(GREEN_LED_PIN, LOW);
+        tone(BUZZER_PIN, 500);
+        delay(200);
+        noTone(BUZZER_PIN);
 
-      Serial2.println("TAKE_PHOTO_AND_SEND");
-    } else {
-      digitalWrite(RED_LED_PIN, LOW);
-      digitalWrite(GREEN_LED_PIN, HIGH);
+        digitalWrite(RED_LED_PIN, LOW);
+        Serial2.println("TAKE_PHOTO_AND_SEND");
+      } else {
+        digitalWrite(RED_LED_PIN, LOW);
+        digitalWrite(GREEN_LED_PIN, HIGH);
+        delay(200);
+        digitalWrite(GREEN_LED_PIN, LOW);
 
-      Serial2.println("TAKE_PHOTO");
+        Serial2.println("TAKE_PHOTO");
+      }
     }
-  } 
+  }
+  else {
+    digitalWrite(RED_LED_PIN, LOW);
+    tone(BUZZER_PIN, 0);
+  }
   if (nightMode || SurveillanceMode) {
     digitalWrite(YELLOW_LED_PIN, HIGH);
   } else {
     digitalWrite(YELLOW_LED_PIN, LOW);
   }
-
-  if (gasValue > 2000) {
+  
+  if (gasValue > 3500) {
     sendMessage("Gas leak detected! Value: " + String(gasValue));
-    digitalWrite(BUZZER_PIN, HIGH);
+    tone(BUZZER_PIN, 1200);
     digitalWrite(RED_LED_PIN, HIGH);
     digitalWrite(GREEN_LED_PIN, LOW);
     delay(1000);
-    digitalWrite(BUZZER_PIN, LOW);
+    tone(BUZZER_PIN, 0);
+    digitalWrite(RED_LED_PIN, LOW);
   }
   
   checkWifi();
-
-
+  if (millis() - lastBotTime > botInterval) {
+    checkTelegramMessages();
+    lastBotTime = millis();
+  }
+  lcd.setCursor(0, 0);
+  lcd.printf("In:%d ", numberOfPeople);
+  lcd.setCursor(8, 0);
+  lcd.printf("Gas:%4d", gasValue);
+  lcd.setCursor(0, 1);
+  lcd.printf("T:%2.1fC H:%2.1f%%", temperature, humidity);
+  
 }
 
 
 void sendMessage(String message) {
   if(WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    String url = "https://api.telegram.org/bot" + botToken + "/sendMessage?chat_id=" + chatID + "&text=" + message;
+    String encodedMessage = urlEncode(message);
+    String url = "https://api.telegram.org/bot" + botToken +
+                 "/sendMessage?chat_id=" + chatID +
+                 "&text=" + encodedMessage;
     http.begin(url);
     int httpResponseCode = http.GET();
     
     if(httpResponseCode > 0) {
       Serial.println("ส่งข้อความสำเร็จ: " + String(httpResponseCode));
+      Serial.println(http.getString());
     } else {
       Serial.println("ไม่สามารถส่งข้อความได้, รหัสข้อผิดพลาด: " + String(httpResponseCode));
     }
@@ -168,15 +221,7 @@ void connectWiFi() {;
     delay(250);
     digitalWrite(YELLOW_LED_PIN, LOW);
     delay(250);
-    Serial.print(".");
-    
-    // แสดงความคืบหน้า
-    /*
-    display.fillRect(0, 10, SCREEN_WIDTH, 10, BLACK);
-    display.setCursor(0, 10);
-    display.printf("Attempt %d/20", attempts + 1);
-    display.display();*/
-    
+    Serial.print(".");    
     attempts++;
     
   }
@@ -189,35 +234,57 @@ void connectWiFi() {;
   }
 }
 
-void sendDataToGoogleSheets(String time, float temperature, float tds, bool oxygenPumpState, bool heaterState, bool coolerState, bool filterState) {
+
+void checkTelegramMessages() {
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Checking Msg...");
+  lcd.setCursor(0, 1);
+  lcd.print("Wait a moment");
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-
-    // Prepare JSON payload
-    String jsonPayload = "{\"time\":\"" + time +
-                         "\",\"temperature\":" + String(temperature) +
-                         ",\"tds\":" + String(tds) +
-                         ",\"oxygenPumpState\":" + (oxygenPumpState ? "true" : "false") +
-                         ",\"heaterState\":" + (heaterState ? "true" : "false") +
-                         ",\"coolerState\":" + (coolerState ? "true" : "false") +
-                         ",\"filterState\":" + (filterState ? "true" : "false") + "}";
-
-    http.begin(googleScriptURL);
-    http.addHeader("Content-Type", "application/json");
-
-    int httpResponseCode = http.POST(jsonPayload);
+    String url = "https://api.telegram.org/bot" + botToken + "/getUpdates?offset=" + String(lastUpdateId + 1);
+    http.begin(url);
+    int httpResponseCode = http.GET();
 
     if (httpResponseCode > 0) {
-      Serial.println("Data sent successfully to Google Sheets.");
-      Serial.println(http.getString());
-    } else {
-      Serial.print("Error sending data: ");
-      Serial.println(httpResponseCode);
+      String response = http.getString();
+      Serial.println("Response: " + response);
+
+      StaticJsonDocument<2048> doc; 
+      DeserializationError error = deserializeJson(doc, response);
+
+      if (!error) {
+        JsonArray result = doc["result"].as<JsonArray>();
+        for (JsonObject msg : result) {
+          lastUpdateId = msg["update_id"].as<long>();
+
+          String text = msg["message"]["text"].as<String>();
+          String chat_id = msg["message"]["chat"]["id"].as<String>();
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print(text);
+          lcd.setCursor(0, 1);
+          lcd.print("Sending...");
+          if (text == "/status") {
+            String reply = "People: " + String(numberOfPeople) +
+                           "\nGas: " + String(gasValue) +
+                           "\nTemp: " + String(temperature) + "C" +
+                           "\nHumidity: " + String(humidity) + "%";
+            sendMessage(reply);
+          }
+          else if (text == "/nightmode") {
+            nightMode = !nightMode;
+            sendMessage("Night mode toggled: " + String(nightMode ? "ON" : "OFF"));
+          }
+        }
+      }
     }
-
-
     http.end();
-  } else {
-    Serial.println("Wi-Fi not connected. Unable to send data.");
   }
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Success");
+  lcd.clear();
+  lcd.setCursor(0, 0);
 }
